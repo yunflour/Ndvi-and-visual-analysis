@@ -14,22 +14,28 @@ from sklearn.preprocessing import PolynomialFeatures
 from scipy.optimize import curve_fit
 from osgeo import gdal, osr
 import os
-import proj
+import threading
+import re
 
 data = pd.DataFrame()
 data_1 = pd.DataFrame()
 data_2 = pd.DataFrame()
-x_col = None
-y_col = None
+x_col = 0
+y_col = 1
 ylabel = None
 xlabel = None
 kind = None
 axes = None
 fig = None
+if_show = 0
 sub_colums = None
 sub_rows = None
-ndvi_arr = []
-tag = 0
+ndvi_arr = pd.DataFrame()
+tag, tags, print_tag = 0, 0, 0
+reg_y = None
+reg_x = None
+y_predict = None
+r2, new_r2 = None, None
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -124,6 +130,33 @@ class My_Nddata(Ui_dialog, QDialog):
         self.lon_latshow.clicked.connect(
             self.lon_lat_fuc
         )
+        self.residual_analysis.clicked.connect(
+            self.residual_analysis_fuc
+        )
+        self.conclusion_Button.clicked.connect(
+            self.conclusion_fuc
+        )
+        self.auto_reg.clicked.connect(
+            self.auto_r
+        )
+        self.batch.clicked.connect(
+            self.bat_bro
+        )
+        self.tabWidget_2.currentChanged.connect(
+            self.change_tab
+        )
+        self.year_ndvi.clicked.connect(
+            self.bat_years
+        )
+        self.clear_ndvi_arr.clicked.connect(
+            self.clear_ndvi_arr_fuc
+        )
+
+    def change_tab(self):
+        if self.tabWidget_2.currentIndex() == 1:
+            self.label_59.setStyleSheet("color: red")
+        if self.tabWidget_2.currentIndex() == 0:
+            self.label_59.setStyleSheet("color: black")
 
     def toplot(self):
         global data
@@ -148,16 +181,6 @@ class My_Nddata(Ui_dialog, QDialog):
         sub_rows = self.subplotsrows.value()
         sub_colums = self.subplotscolums.value()
         fig, axes = plt.subplots(sub_rows, sub_colums)
-
-    def calculate_ndvi(self, red_band, nir_band):
-        red = red_band.astype(np.float64)
-        nir = nir_band.astype(np.float64)
-        numerator = nir - red
-        denominator = nir + red
-        denominator[denominator == 0] = 0.00001  # 将分母中为0的元素替换为0.0001
-        ndvi = numerator / denominator
-        ndvi = ndvi.astype(np.float64)
-        return ndvi
 
     def save_ndvi_as_tif(self, output_file, ndvi_array, dataset):
         driver = gdal.GetDriverByName('GTiff')
@@ -202,6 +225,16 @@ class My_Nddata(Ui_dialog, QDialog):
         file_name_nir = QFileDialog.getOpenFileName(self, '选择单个文件', filter='*.tif')
         self.line_nir.setText(file_name_nir[0])
 
+    def calculate_ndvi(self, red_band, nir_band):
+        red = red_band.astype(np.float64)
+        nir = nir_band.astype(np.float64)
+        numerator = nir - red
+        denominator = nir + red
+        denominator[denominator == 0] = 0.00001  # 将分母中为0的元素替换为0.0001
+        ndvi = numerator / denominator
+        ndvi = ndvi.astype(np.float64)
+        return ndvi
+
     def main(self):
         global ndvi_arr, tag
         red_file = self.line_red.text()
@@ -241,23 +274,42 @@ class My_Nddata(Ui_dialog, QDialog):
         x_max = gt[0] + cols * gt[1] + rows * gt[2]
         y_min = gt[3] + cols * gt[4] + rows * gt[5]
 
-
         px_min = int((x_min - gt[0]) / gt[1])  # 左上角的x坐标
         px_max = int((x_max - gt[0]) / gt[1])  # 右下角的x坐标
         py_max = int((y_min - gt[3]) / gt[5])  # 左上角的y坐标
         py_min = int((y_max - gt[3]) / gt[5])  # 右下角的y坐标
 
-        oxmin = round((lat_min - lr_lat) / (ul_lat - lr_lat) * (px_max-px_min))
-        oxmax = round((lat_max - lr_lat) / (ul_lat - lr_lat) * (px_max-px_min))
-        oymin = round((lon_min - lr_lon) / (ul_lon - lr_lon) * (py_max-py_min))
-        oymax = round((lon_max - lr_lon) / (ul_lon - lr_lon) * (py_max-py_min))
+        oxmin = round((lat_min - lr_lat) / (ul_lat - lr_lat) * (px_max - px_min))
+        oxmax = round((lat_max - lr_lat) / (ul_lat - lr_lat) * (px_max - px_min))
+        oymin = round((lon_min - lr_lon) / (ul_lon - lr_lon) * (py_max - py_min))
+        oymax = round((lon_max - lr_lon) / (ul_lon - lr_lon) * (py_max - py_min))
 
         # 选择感兴趣的像素并计算平均值
-        ndvi_roi = ndvi[oymin:oymax, oxmin:oxmax]
+        ndvi_roi = ndvi[oxmin:oxmax, oymin:oymax]
+        for i in range(ndvi_roi.shape[0]):
+            for j in range(ndvi_roi.shape[1]):
+                if ndvi_roi[i][j] == 0 and red_band[i + oxmin][j + oymin] == 0:
+                    ndvi_roi[i][j] = np.nan
+        ndvi_roi = ndvi_roi[~np.isnan(ndvi_roi)]
+        if ndvi_roi.size == 0:
+            QMessageBox.warning(self, "警告", "所选区域无有效像素！")
+            return 0
         mean_ndvi = np.mean(ndvi_roi)
-        ndvi_arr.append(round(mean_ndvi, 4))
+        ndvi_arr = pd.concat(
+            [ndvi_arr, pd.DataFrame({'time': [self.ndvi_row_label.text()], 'ndvi_mean': [round(mean_ndvi, 4)]})],
+            ignore_index=True)
+
         tag += 1
         self.ndvi_num.setText(f'{tag}')
+        # self.ndvi_row_label_show.setText(ndvi_arr.iloc[:, 0].to_string(index=False).replace("\n", ","))
+        # 将 DataFrame 转换成字符串，并用逗号分隔
+        show_text = ndvi_arr.iloc[:, 0].to_string(index=False).replace("\n", ",")
+        # 将字符串按照每 40 个字符分割成多行
+        lines = [show_text[i:i + 40] for i in range(0, len(show_text), 40)]
+        # 使用换行符将多行拼接成一个字符串
+        formatted_text = "\n".join(lines)
+        # 将处理后的字符串设置为 label 的文本
+        self.ndvi_row_label_show.setText(formatted_text)
         self.ndvi_meano.setText(f"指定经纬度范围内的NDVI平均值:\n {mean_ndvi}")
 
     def lon_lat_fuc(self):
@@ -277,10 +329,10 @@ class My_Nddata(Ui_dialog, QDialog):
             return 0
 
     def to_csv_fuc(self):
+        global ndvi_arr
         try:
-            global ndvi_arr
-            df = pd.DataFrame(ndvi_arr, columns=["平均ndvi"])
-            df.to_csv("ndvi_mean.csv", index=False, encoding="utf-8")
+            ndvi_arr = ndvi_arr.sort_values(by='time')
+            ndvi_arr.to_csv("ndvi_mean.csv", index=False, encoding="gbk")
         except Exception as e:
             QMessageBox.warning(self, "提示", f"出现异常：{e}")
 
@@ -415,6 +467,10 @@ class My_Nddata(Ui_dialog, QDialog):
             self.x_name.setText(names[x_col])
             self.y_name.setText(names[y_col])
 
+    def browsefile(self):
+        file_name = QFileDialog.getOpenFileName(self, '选择单个文件', filter='*.txt;*.csv')
+        self.pathEdit.setText(file_name[0])
+
     def browsefile_1(self):
         file_name = QFileDialog.getOpenFileName(self, '选择单个文件', filter='*.txt;*.csv')
         self.pathEdit_1.setText(file_name[0])
@@ -423,28 +479,8 @@ class My_Nddata(Ui_dialog, QDialog):
         file_name = QFileDialog.getOpenFileName(self, '选择单个文件', filter='*.txt;*.csv')
         self.pathEdit_2.setText(file_name[0])
 
-    def ld1data(self):
-        global data_1
-        if not self.colsEdit.text():
-            QMessageBox.warning(self, "警告", "请先输入使用的是哪几列数据")
-            return 0
-        if self.skipBox.value() == -1:
-            QMessageBox.warning(self, "警告", "请先输入需要跳过的行数")
-            return 0
-        data_1 = self.load(path=self.pathEdit_1.text())
-
-    def ld2data(self):
-        global data_2
-        if not self.colsEdit.text():
-            QMessageBox.warning(self, "警告", "请先输入使用的是哪几列数据")
-            return 0
-        if self.skipBox.value() == -1:
-            QMessageBox.warning(self, "警告", "请先输入需要跳过的行数")
-            return 0
-        data_2 = self.load(path=self.pathEdit_2.text())
-
     def lddata(self):
-        global data
+        global data, print_tag
         if not self.colsEdit.text():
             QMessageBox.warning(self, "警告", "请先输入使用的是哪几列数据")
             return 0
@@ -452,15 +488,44 @@ class My_Nddata(Ui_dialog, QDialog):
             QMessageBox.warning(self, "警告", "请先输入需要跳过的行数")
             return 0
         data = self.load(path=self.pathEdit.text())
+        print_tag = 0
 
-    def load(self, path):
+    def ld1data(self):
+        global data_1, print_tag
+        if not self.colsEdit.text():
+            QMessageBox.warning(self, "警告", "请先输入使用的是哪几列数据")
+            return 0
+        if self.skipBox.value() == -1:
+            QMessageBox.warning(self, "警告", "请先输入需要跳过的行数")
+            return 0
+        data_1 = self.load(path=self.pathEdit_1.text(), source=1)
+        print_tag = 1
+
+    def ld2data(self):
+        global data_2, print_tag
+        if not self.colsEdit.text():
+            QMessageBox.warning(self, "警告", "请先输入使用的是哪几列数据")
+            return 0
+        if self.skipBox.value() == -1:
+            QMessageBox.warning(self, "警告", "请先输入需要跳过的行数")
+            return 0
+        data_2 = self.load(path=self.pathEdit_2.text(), source=2)
+        print_tag = 2
+
+    def load(self, path, source=0):
         skiprows = self.skipBox.value()
         clos = list((np.array(list(self.colsEdit.text()), dtype=int)) - 1)
-
+        bol = 0
         # 判断数据中分隔符类型
         delim = self.delimEdit.text()
+        if source == 0:
+            bol = bool(self.pathEdit.text().endswith('.csv'))
+        elif source == 1:
+            bol = bool(self.pathEdit_1.text().endswith('.csv'))
+        elif source == 2:
+            bol = bool(self.pathEdit_2.text().endswith('.csv'))
         if not delim:
-            if self.pathEdit.text().endswith('.csv'):
+            if bol:
                 delimiter = ','
                 delim_whitespace = False
             else:
@@ -510,7 +575,7 @@ class My_Nddata(Ui_dialog, QDialog):
         return dataframe
 
     def merge(self):
-        global data, data_1, data_2
+        global data, data_1, data_2, print_tag
         how = None
         left_index = False
         right_index = False
@@ -532,17 +597,25 @@ class My_Nddata(Ui_dialog, QDialog):
         else:
             on = None
         data = pd.merge(data_1, data_2, how=how, on=on, left_index=left_index, right_index=right_index)
+        print_tag = 0
         print(data)
 
     def print_data(self):
-        if data.empty:
-            QMessageBox.warning(self, "警告", "您还没有导入数据")
-        else:
+        if print_tag == 0:
+            if data.empty:
+                QMessageBox.warning(self, "警告", "您还没有导入数据")
+                return 0
             QMessageBox.about(self, "展示数据", str(data))
-
-    def browsefile(self):
-        file_name = QFileDialog.getOpenFileName(self, '选择单个文件', filter='*.txt;*.csv')
-        self.pathEdit.setText(file_name[0])
+        elif print_tag == 1:
+            if data_1.empty:
+                QMessageBox.warning(self, "警告", "您还没有导入数据")
+                return 0
+            QMessageBox.about(self, "展示数据", str(data_1))
+        elif print_tag == 2:
+            if data_2.empty:
+                QMessageBox.warning(self, "警告", "您还没有导入数据")
+                return 0
+            QMessageBox.about(self, "展示数据", str(data_2))
 
     def showdialog(self):
         selc = QColorDialog.getColor()
@@ -551,30 +624,30 @@ class My_Nddata(Ui_dialog, QDialog):
             self.colorwidget.setStyleSheet('QWidget {background-color:%s}' % selc.name())
 
     def lreg(self):
-        global x_col, y_col
+        global x_col, y_col, reg_y, y_predict, reg_x, r2
         temp_x = data.iloc[:, x_col]
         temp_y = data.iloc[:, y_col]
-        print(temp_x, temp_y)
         reg_x = np.array(temp_x).reshape(-1, 1)
         reg_y = np.array(temp_y)
         lr1 = LinearRegression()
         lr1.fit(reg_x, reg_y)
         y_predict = lr1.predict(reg_x)
         r2 = r2_score(reg_y, y_predict)
-        plt.scatter(reg_y, y_predict)
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
-        if not os.path.exists('analysis results'):
-            os.makedirs('analysis results')
-        plt.savefig('analysis results/lreg.png')
-        plt.show()
+        if if_show == 0:
+            plt.scatter(reg_y, y_predict)
+            plt.xlabel("实际值")
+            plt.ylabel("预测值")
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/lreg.png')
+            plt.show()
         self.regression_o.setText("r2 = %f\n线性回归方程为y=%fx+%f" % (r2, lr1.coef_, lr1.intercept_))
 
     def muti(self):
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['figure.dpi'] = 100
-        global x_col, y_col
+        global x_col, y_col, reg_y, y_predict, reg_x, r2
         temp_x = data.iloc[:, x_col]
         temp_y = data.iloc[:, y_col]
         reg_x = np.array(temp_x).reshape(-1, 1)
@@ -586,21 +659,22 @@ class My_Nddata(Ui_dialog, QDialog):
         estimator_2.fit(reg_x_2, reg_y)
         y_predict = estimator_2.predict(reg_x_2)
         r2 = r2_score(reg_y, y_predict)
-        plt.scatter(reg_y, y_predict)
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
-        if not os.path.exists('analysis results'):
-            os.makedirs('analysis results')
-        plt.savefig('analysis results/muti.png')
-        plt.show()
-        self.regression_om.setText("r2 = %f\n线性回归方程为y=%fx**2+%fx+%f" % (r2, estimator_2.coef_[2],
-                                                                        estimator_2.coef_[1], estimator_2.intercept_))
+        if if_show == 0:
+            plt.scatter(reg_y, y_predict)
+            plt.xlabel("实际值")
+            plt.ylabel("预测值")
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/muti.png')
+            plt.show()
+        self.regression_om.setText("r2 = %f\n多项式回归方程为y=%fx**2+%fx+%f" % (r2, estimator_2.coef_[2],
+                                                                         estimator_2.coef_[1], estimator_2.intercept_))
 
     def ln(self):
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['figure.dpi'] = 100
-        global x_col, y_col
+        global x_col, y_col, reg_y, y_predict, reg_x, r2
         temp_x = data.iloc[:, x_col]
         temp_y = data.iloc[:, y_col]
         reg_x = np.array(temp_x)
@@ -608,7 +682,6 @@ class My_Nddata(Ui_dialog, QDialog):
 
         def func(x, a, c):
             return a * np.log(x) + c
-
 
         # reg_x = np.linspace(0.01, 4, 50)
         # y = func(reg_x, 2.5, 1)
@@ -620,20 +693,21 @@ class My_Nddata(Ui_dialog, QDialog):
 
         y_predict = func(reg_x, *popt)
         r2 = r2_score(reg_y, y_predict)
-        plt.scatter(reg_y, y_predict)
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
-        if not os.path.exists('analysis results'):
-            os.makedirs('analysis results')
-        plt.savefig('analysis results/ln.png')
-        plt.show()
+        if if_show == 0:
+            plt.scatter(reg_y, y_predict)
+            plt.xlabel("实际值")
+            plt.ylabel("预测值")
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/ln.png')
+            plt.show()
         self.regression_oln.setText("r2 = %f\n对数回归方程为y=%f * ln(x) + %f" % (r2, popt[0], popt[1]))
 
     def ex(self):
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['figure.dpi'] = 100
-        global x_col, y_col
+        global x_col, y_col, reg_y, y_predict, reg_x, r2
         temp_x = data.iloc[:, x_col]
         temp_y = data.iloc[:, y_col]
         reg_x = np.array(temp_x)
@@ -655,27 +729,28 @@ class My_Nddata(Ui_dialog, QDialog):
 
         y_predict = func(reg_x, *popt)
         r2 = r2_score(reg_y, y_predict)
-        plt.scatter(reg_y, y_predict)
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
-        if not os.path.exists('analysis results'):
-            os.makedirs('analysis results')
-        plt.savefig('analysis results/oex.png')
-        plt.show()
+        if if_show == 0:
+            plt.scatter(reg_y, y_predict)
+            plt.xlabel("实际值")
+            plt.ylabel("预测值")
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/oex.png')
+            plt.show()
         self.regression_oex.setText("r2 = %f\n指数回归方程为y=%f * exp(%f * x)" % (r2, popt[0], popt[1]))
 
     def power(self):
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['figure.dpi'] = 100
-        global x_col, y_col
+        global x_col, y_col, reg_y, y_predict, reg_x, r2
         temp_x = data.iloc[:, x_col]
         temp_y = data.iloc[:, y_col]
-        reg_x = np.array(temp_x).reshape(-1, 1)
+        reg_x = np.array(temp_x)
         reg_y = np.array(temp_y)
 
-        def func(x, a, b, c):
-            return a * np.power(x, b) + c
+        def func(x, a, b):
+            return a * np.power(x, b)
 
         try:
             popt, pcov = curve_fit(func, reg_x, reg_y)
@@ -685,14 +760,146 @@ class My_Nddata(Ui_dialog, QDialog):
 
         y_predict = func(reg_x, *popt)
         r2 = r2_score(reg_y, y_predict)
-        plt.scatter(reg_y, y_predict)
-        plt.xlabel("实际值")
-        plt.ylabel("预测值")
-        if not os.path.exists('analysis results'):
-            os.makedirs('analysis results')
-        plt.savefig('analysis results/power.png')
-        plt.show()
-        self.regression_op.setText("r2 = %f\n幂函数回归方程为y=%f * x^%f + %f" % (r2, popt[0], popt[1], popt[2]))
+        if if_show == 0:
+            plt.scatter(reg_y, y_predict)
+            plt.xlabel("实际值")
+            plt.ylabel("预测值")
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/power.png')
+            plt.show()
+        self.regression_op.setText("r2 = %f\n幂函数回归方程为y=%f * x^%f" % (r2, popt[0], popt[1]))
+
+    def residual_analysis_fuc(self):
+        global reg_x, reg_y, y_predict, new_r2, r2, tags
+        if reg_x is None:
+            QMessageBox.warning(self, "警告", "请先进行回归分析")
+            return 0
+        residual = reg_y - y_predict
+        mean_residual = np.mean(residual)
+        std_residual = np.std(residual)
+        standardized_residual = (residual - mean_residual) / std_residual
+        for i in standardized_residual:
+            if i < -2 or i > 2:
+                tags = 1
+                break
+        new_data = pd.concat([pd.DataFrame(reg_x), pd.DataFrame(reg_y)], axis=1)
+        new_data.columns = ['x', 'y']
+        new_data['residual'] = residual
+        new_data['standardized_residual'] = standardized_residual
+        abnormal_data = new_data[(new_data['standardized_residual'] < -2) | (new_data['standardized_residual'] > 2)]
+        new_data = new_data[(new_data['standardized_residual'] > -2) & (new_data['standardized_residual'] < 2)]
+        new_reg_x = new_data['x'].values.reshape(-1, 1)
+        new_reg_y = new_data['y'].values.reshape(-1, 1)
+        if tags == 1:
+            if if_show == 0:
+                QMessageBox.warning(self, "警告", "存在异常实验点，已剔除,如下异常值项\n（忽略第一个编号）\n从左到右其次为%s" % abnormal_data)
+            if self.tabWidget_regression.currentIndex() == 0:
+                lr1 = LinearRegression()
+                lr1.fit(new_reg_x, new_reg_y)
+                new_y_predict = lr1.predict(new_reg_x)
+                new_r2 = r2_score(new_reg_y, new_y_predict)
+                self.regression_R2.setText("%f" % new_r2)
+                self.regression_o.setText("r2 = %f\n线性回归方程为y=%fx+%f" % (new_r2, lr1.coef_, lr1.intercept_))
+            elif self.tabWidget_regression.currentIndex() == 1:
+                poly = PolynomialFeatures(degree=2)
+                poly.fit(new_reg_x)
+                reg_x_2 = poly.transform(new_reg_x).reshape(-1, 3)
+                estimator_2 = LinearRegression()
+                estimator_2.fit(reg_x_2, new_reg_y)
+                new_y_predict = estimator_2.predict(reg_x_2)
+                new_r2 = r2_score(new_reg_y, new_y_predict)
+                self.regression_muti_R2.setText("%f" % new_r2)
+                self.regression_om.setText("r2 = %f\n多项式回归方程为y=%fx**2+%fx+%f" % (new_r2, estimator_2.coef_[0, 2],
+                                                                                 estimator_2.coef_[0, 1],
+                                                                                 estimator_2.intercept_))
+            elif self.tabWidget_regression.currentIndex() == 2:
+                func = lambda x, a, b: a * np.log(x) + b
+                new_popt, new_pcov = curve_fit(func, new_reg_x.ravel(), new_reg_y.ravel())
+                new_y_predict = func(new_reg_x, *new_popt)
+                new_r2 = r2_score(new_reg_y, new_y_predict)
+                self.regression_ln_R2.setText("%f" % new_r2)
+                self.regression_oln.setText("r2 = %f\n对数函数回归方程为y=%f * ln(x) + %f" % (new_r2, new_popt[0], new_popt[1]))
+
+            elif self.tabWidget_regression.currentIndex() == 3:
+                func = lambda x, a, b: a * np.exp(b * x)
+                new_popt, new_pcov = curve_fit(func, new_reg_x.ravel(), new_reg_y.ravel())
+                new_y_predict = func(new_reg_x, *new_popt)
+                new_r2 = r2_score(new_reg_y, new_y_predict)
+                self.regression_ex_R2.setText("%f" % new_r2)
+                self.regression_oex.setText("r2 = %f\n指数函数回归方程为y=%f * e^(%f * x)" % (new_r2, new_popt[0], new_popt[1]))
+
+            elif self.tabWidget_regression.currentIndex() == 4:
+                func = lambda x, a, b: a * np.power(x, b)
+                new_popt, new_pcov = curve_fit(func, new_reg_x.ravel(), new_reg_y.ravel())
+                new_y_predict = func(new_reg_x, *new_popt)
+                new_r2 = r2_score(new_reg_y, new_y_predict)
+                self.regression_p_R2.setText("%f" % new_r2)
+                self.regression_op.setText(
+                    "r2 = %f\n幂函数回归方程为y=%f * x^%f" % (new_r2, new_popt[0], new_popt[1]))
+        else:
+            new_y_predict = pd.DataFrame(y_predict)
+            if self.tabWidget_regression.currentIndex() == 0:
+                self.regression_R2.setText("%f" % r2)
+            if self.tabWidget_regression.currentIndex() == 1:
+                self.regression_muti_R2.setText("%f" % r2)
+            if self.tabWidget_regression.currentIndex() == 2:
+                self.regression_ln_R2.setText("%f" % r2)
+            if self.tabWidget_regression.currentIndex() == 3:
+                self.regression_ex_R2.setText("%f" % r2)
+            if self.tabWidget_regression.currentIndex() == 4:
+                self.regression_p_R2.setText("%f" % r2)
+            if if_show == 0:
+                QMessageBox.information(self, "提示", "不存在异常实验点")
+        tags = 0  # 重置异常点标志位
+        residual = new_reg_y - new_y_predict
+        mean_residual = np.mean(residual)
+        std_residual = np.std(residual)
+        standardized_residual = (residual - mean_residual) / std_residual
+        if if_show == 0:
+            plt.scatter(new_y_predict, standardized_residual)
+            plt.xlabel("去除异常点后的预测值")
+            plt.ylabel("标准化残差值")
+            plt.title("残差分析")
+            plt.tight_layout()
+            if not os.path.exists('analysis results'):
+                os.makedirs('analysis results')
+            plt.savefig('analysis results/residual_analysis.png')
+            plt.show()
+
+    def conclusion_fuc(self):
+        global r2
+        good_list = []
+        r2_dict = {"线性回归": float(self.regression_R2.text()), "多项式回归": float(self.regression_muti_R2.text()),
+                   "对数函数回归": float(self.regression_ln_R2.text()), "指数函数回归": float(self.regression_ex_R2.text()),
+                   "幂函数回归": float(self.regression_p_R2.text())}
+        max_r2 = max(r2_dict.values())
+        min_r2 = min(r2_dict.values())
+        for key, value in r2_dict.items():
+            if value == max_r2:
+                good_list.append(key)
+        if float(self.regression_R2.text()) == max_r2:
+            self.regression_R2.setStyleSheet("color: red")
+        elif float(self.regression_R2.text()) == min_r2:
+            self.regression_R2.setStyleSheet("color: blue")
+        if float(self.regression_muti_R2.text()) == max_r2:
+            self.regression_muti_R2.setStyleSheet("color: red")
+        elif float(self.regression_muti_R2.text()) == min_r2:
+            self.regression_muti_R2.setStyleSheet("color: blue")
+        if float(self.regression_ln_R2.text()) == max_r2:
+            self.regression_ln_R2.setStyleSheet("color: red")
+        elif float(self.regression_ln_R2.text()) == min_r2:
+            self.regression_ln_R2.setStyleSheet("color: blue")
+        if float(self.regression_ex_R2.text()) == max_r2:
+            self.regression_ex_R2.setStyleSheet("color: red")
+        elif float(self.regression_ex_R2.text()) == min_r2:
+            self.regression_ex_R2.setStyleSheet("color: blue")
+        if float(self.regression_p_R2.text()) == max_r2:
+            self.regression_p_R2.setStyleSheet("color: red")
+        elif float(self.regression_p_R2.text()) == min_r2:
+            self.regression_p_R2.setStyleSheet("color: blue")
+        if good_list:
+            self.conclusion.setText("%s\n的决定系数最接近1，故该模型对数据拟合较好" % good_list)
 
     def rbox(self):
         # 设置参数
@@ -865,6 +1072,159 @@ class My_Nddata(Ui_dialog, QDialog):
         self.lbl.resize(400, 240)
         self.lbl.setScaledContents(True)
         plt.show()
+
+    def auto_r(self):
+        global if_show
+        if_show = 1
+        self.regression_resi()
+        self.regression_muti_resi()
+        self.regression_ln_resi()
+        self.regression_ex_resi()
+        self.regression_p_resi()
+        self.conclusion_fuc()
+        if_show = 0
+
+    def regression_resi(self):
+        self.lreg()
+        self.tabWidget_regression.setCurrentIndex(0)
+        self.residual_analysis_fuc()
+
+    def regression_muti_resi(self):
+        self.muti()
+        self.tabWidget_regression.setCurrentIndex(1)
+        self.residual_analysis_fuc()
+
+    def regression_ln_resi(self):
+        self.ln()
+        self.tabWidget_regression.setCurrentIndex(2)
+        self.residual_analysis_fuc()
+
+    def regression_ex_resi(self):
+        self.ex()
+        self.tabWidget_regression.setCurrentIndex(3)
+        self.residual_analysis_fuc()
+
+    def regression_p_resi(self):
+        self.power()
+        self.tabWidget_regression.setCurrentIndex(4)
+        self.residual_analysis_fuc()
+
+    def bat(self):
+        global ndvi_arr, tag
+        red_file = ''
+        nir_file = ''
+        threads = []
+        for root, dirs, files in os.walk(self.batch_data.text()):
+            for file in files:
+                if file.endswith("B4.TIF"):
+                    red_file = os.path.join(root, file)
+                if file.endswith("B5.TIF"):
+                    nir_file = os.path.join(root, file)
+                if red_file and nir_file:
+                    pattern = r'\d{8}'
+                    temp = re.search(pattern, file)
+                    match = temp.group()[:6]
+                    self.line_red.setText(red_file)
+                    self.line_nir.setText(nir_file)
+                    t = threading.Thread(target=self.main_bat, args=(match,))
+                    threads.append(t)
+                    t.start()
+                    tread_num = self.Thread.value()
+                    if len(threads) == tread_num:
+                        for t in threads:
+                            try:
+                                t.join()
+                            except MemoryError:
+                                QMessageBox.warning(self, "警告", "内存或栈溢出，请减少线程数量并清除数据后重新进行批处理")
+                                break
+                        threads = []
+                    break
+            red_file = ''
+            nir_file = ''
+        for t in threads:
+            t.join()
+        self.ndvi_num.setText(f'{tag}')
+        QMessageBox.information(self, "提示", "批处理完成,如果数据缺失，代表所选区域对应的遥感影像无数据")
+
+    def main_bat(self, match=''):
+        global ndvi_arr, tag
+        red_file = self.line_red.text()
+        nir_file = self.line_nir.text()
+        red_dataset = gdal.Open(red_file)
+        nir_dataset = gdal.Open(nir_file)
+
+        red_band = red_dataset.GetRasterBand(1).ReadAsArray()
+        nir_band = nir_dataset.GetRasterBand(1).ReadAsArray()
+
+        ndvi = self.calculate_ndvi(red_band, nir_band)
+        # self.save_ndvi_as_tif("ndvi_output.tif", ndvi, red_dataset)
+
+        srs = osr.SpatialReference(wkt=red_dataset.GetProjection())
+        src_epsg = int(srs.GetAttrValue('AUTHORITY', 1))
+        transform, rever_transform = self.transform_to_wgs84(src_epsg, red_dataset)
+
+        ul_lon, lr_lat, lr_lon, ul_lat = self.get_lat_lon_bounds(red_dataset, transform)
+        print(f"经纬度范围: ({lr_lon}, {lr_lat}) - ({ul_lon}, {ul_lat}) ")
+
+        lat_max = float(self.line_au.text()) if self.line_au.text() else ul_lat
+        lat_min = float(self.line_al.text()) if self.line_al.text() else lr_lat
+        lon_min = float(self.line_ol.text()) if self.line_ol.text() else lr_lon
+        lon_max = float(self.line_ou.text()) if self.line_ou.text() else ul_lon
+
+        # 打开遥感数据文件
+        raster = gdal.Open(red_file)
+        # 获取地理变换信息
+        gt = raster.GetGeoTransform()
+        cols = raster.RasterXSize
+        rows = raster.RasterYSize
+        # 将经纬度转换为像素坐标范围
+        x_min = gt[0]
+        y_max = gt[3]
+        x_max = gt[0] + cols * gt[1] + rows * gt[2]
+        y_min = gt[3] + cols * gt[4] + rows * gt[5]
+
+        px_min = int((x_min - gt[0]) / gt[1])  # 左上角的x坐标
+        px_max = int((x_max - gt[0]) / gt[1])  # 右下角的x坐标
+        py_max = int((y_min - gt[3]) / gt[5])  # 左上角的y坐标
+        py_min = int((y_max - gt[3]) / gt[5])  # 右下角的y坐标
+
+        oxmin = round((lat_min - lr_lat) / (ul_lat - lr_lat) * (px_max - px_min))
+        oxmax = round((lat_max - lr_lat) / (ul_lat - lr_lat) * (px_max - px_min))
+        oymin = round((lon_min - lr_lon) / (ul_lon - lr_lon) * (py_max - py_min))
+        oymax = round((lon_max - lr_lon) / (ul_lon - lr_lon) * (py_max - py_min))
+
+        # 选择感兴趣的像素并计算平均值
+        ndvi_roi = ndvi[oxmin:oxmax, oymin:oymax]
+        for i in range(ndvi_roi.shape[0]):
+            for j in range(ndvi_roi.shape[1]):
+                if ndvi_roi[i][j] == 0 and red_band[i + oxmin][j + oymin] == 0:
+                    ndvi_roi[i][j] = np.nan
+        ndvi_roi = ndvi_roi[~np.isnan(ndvi_roi)]
+        if ndvi_roi.size == 0:
+            return 0
+        mean_ndvi = np.mean(ndvi_roi)
+
+        ndvi_arr = pd.concat(
+            [ndvi_arr, pd.DataFrame({'time': [match], 'ndvi_mean': [round(mean_ndvi, 4)]})],
+            ignore_index=True)
+        tag += 1
+
+    def bat_years(self):
+        global ndvi_arr
+        print(ndvi_arr)
+        ndvi_arr['year'] = ndvi_arr['time'].str[:4]
+        ndvi_arr = ndvi_arr.groupby('year').mean().reset_index()
+
+    def bat_bro(self):
+        file_name_red = QFileDialog.getExistingDirectory(self, '选择文件夹')
+        self.batch_data.setText(file_name_red)
+        self.bat()
+
+    def clear_ndvi_arr_fuc(self):
+        global ndvi_arr, tag
+        ndvi_arr = pd.DataFrame()
+        tag = 0
+        self.ndvi_num.setText(f'{tag}')
 
 
 if __name__ == '__main__':
